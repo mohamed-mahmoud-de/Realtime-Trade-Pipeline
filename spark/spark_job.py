@@ -1,6 +1,8 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, from_json
 from pyspark.sql.types import StructType, StructField, StringType, LongType
+from pyspark.sql.functions import window, avg, count
+from pyspark.sql.types import TimestampType
 
 spark = SparkSession.builder \
     .appName("TradeStreamProcessor") \
@@ -37,14 +39,33 @@ flattened_trades = parsed_trades.select(
     col("trade.timestamp").alias("timestamp")
 )
 
+trades_with_time = flattened_trades.withColumn(
+    "event_time",
+    (col("timestamp") / 1000).cast(TimestampType())
+).withColumn(
+    "price_numeric",
+    col("price").cast("double")
+)
+
+windowed_avg = trades_with_time \
+    .groupBy(
+        window(col("event_time"), "1 minute"),
+        col("symbol")
+    ) \
+    .agg(
+        avg(col("price_numeric")).alias("avg_price"),
+        count(col("price_numeric")).alias("trade_count")
+    )
+
 parsed_trades.printSchema()
 flattened_trades.printSchema()
 
 
-query = flattened_trades.writeStream \
-    .outputMode("append") \
+query = windowed_avg.writeStream \
+    .outputMode("update") \
     .format("console") \
-    .option("checkpointLocation", "checkpoints/trades_console") \
+    .option("checkpointLocation", "checkpoints/trades_windowed") \
+    .option("truncate", "false") \
     .start()
 
 
