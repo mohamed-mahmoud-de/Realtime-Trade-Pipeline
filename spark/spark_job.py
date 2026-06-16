@@ -14,7 +14,7 @@ df = spark.readStream \
     .format("kafka") \
     .option("kafka.bootstrap.servers", "localhost:9092") \
     .option("subscribe", "trades") \
-    .option("startingOffsets", "earliest") \
+    .option("startingOffsets", "latest") \
     .load()
     
 raw_trades = df.select(
@@ -48,6 +48,7 @@ trades_with_time = flattened_trades.withColumn(
 )
 
 windowed_avg = trades_with_time \
+    .withWatermark("event_time", "2 minutes") \
     .groupBy(
         window(col("event_time"), "1 minute"),
         col("symbol")

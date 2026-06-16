@@ -1,13 +1,11 @@
-# Real-Time Streaming Pipeline
+# Real-Time Streaming Pipeline — CLAUDE.md
 
 ## About this project
 
-A standalone streaming data pipeline built to learn and demonstrate
-real streaming architecture — separate from the Egypt Jobs Pipeline.
-
-This project exists because batch processing (Airflow every 2 hours)
-cannot solve problems that require data within seconds. This project
-solves those problems.
+A standalone streaming data pipeline that ingests live Binance
+cryptocurrency trades via WebSocket, processes them with Spark
+Structured Streaming using tumbling windows, and writes results
+to Cassandra (operational storage) and Elasticsearch (search/aggregation).
 
 **Stack:**
 - Apache Kafka (event ingestion and transport)
@@ -17,9 +15,10 @@ solves those problems.
 - Docker and Docker Compose (all services containerized)
 - Python (producers, consumers, and orchestration)
 
-**Data source:** To be decided in Session 1. Options will be proposed
-by the mentor and chosen by the developer. Must be a naturally
-streaming data source — not batch data forced into a stream.
+**Data source:** Binance WebSocket API — live BTC/USDT trades.
+URL: `wss://stream.binance.com:9443/ws/btcusdt@trade`
+
+**GitHub repo:** https://github.com/mohamed-mahmoud-de/Realtime-Trade-Pipeline
 
 ## About the developer
 
@@ -27,14 +26,165 @@ I'm Mohamed Mahmoud — CS student at Alexandria University,
 Data Engineer Intern at DEPI. I've already built:
 - Egypt Jobs Pipeline V1 (Python + Postgres + Docker)
 - Egypt Jobs Pipeline V2 (Airflow + Streamlit + Discord alerts)
+- Egypt Jobs Pipeline V3 (Redis real-time alert layer)
 
 I understand: Python, Docker Compose, PostgreSQL, Apache Airflow,
-BeautifulSoup, basic ETL concepts, DAGs, task dependencies.
+BeautifulSoup, basic ETL concepts, DAGs, task dependencies, Kafka
+basics (topics, partitions, offsets, consumer groups, producers),
+Spark Structured Streaming basics (readStream, windowing, watermarks,
+checkpoints, output modes).
 
-I have NEVER used: Kafka, Spark, Cassandra, or Elasticsearch.
-I have NEVER built a streaming system of any kind.
+I have NEVER used: Cassandra or Elasticsearch.
+I have basic familiarity with Spark but have only written one job so far.
 
-This is the hardest project I've attempted. Treat it accordingly.
+## What has been built (Sessions 1-8 COMPLETE)
+
+### Session 1: Concepts — batch vs streaming
+- Batch = clock triggers processing; streaming = event triggers processing
+- Core question: "Does waiting matter?"
+- Chose Binance WebSocket as data source (numeric data, good for windowing)
+- Drew full architecture diagram
+- Kafka: producer, topic, consumer explained via Discord analogy
+
+### Session 2: Kafka deep dive + Docker setup
+- Partitions = unit of parallelism (consumers capped by partition count)
+- Offsets = sequential counter per partition for tracking progress
+- At-least-once delivery = crash before commit = duplicate processing
+- ZooKeeper = cluster coordinator
+- Set up Kafka + ZooKeeper via Docker Compose
+- Created `trades` topic with 3 partitions
+- Published and consumed messages via CLI tools
+
+### Session 3: Python producer
+- `producer/producer.py` connects to Binance WebSocket
+- Receives raw trade events, extracts symbol/price/quantity/timestamp
+- Serializes to JSON bytes via lambda (dict → JSON string → bytes)
+- Publishes to `trades` Kafka topic
+- Learned: json.dumps vs json.loads, if __name__ == "__main__", lambda functions
+
+### Session 4: Python consumer + consumer group experiments
+- `consumer/consumer.py` reads from `trades` topic with GROUP_ID
+- Experimented with:
+  - Restart same group → offsets remembered, no replay
+  - 2 consumers same group → partitions split (2+1), no duplication
+  - Different groups → each gets all partitions independently
+- Learned: Kafka message key partitioning (same key → same partition → ordering guarantee)
+
+### Session 5: Spark Structured Streaming concepts (no code)
+- Unbounded table = stream treated as ever-growing table
+- Tumbling windows = non-overlapping time buckets, bounded memory
+- Watermarks = deadline for late data (correctness vs timeliness tradeoff)
+- For crypto: short watermark (seconds/minutes) because late data is stale
+
+### Session 6: Spark setup + first streaming job
+- Installed PySpark, Java 17 (Java 25 incompatible with Spark 4.1.2)
+- Set JAVA_HOME and HADOOP_HOME (winutils.exe for Windows)
+- Added Kafka connector JAR via spark.jars.packages config
+- Spark reads from Kafka, parses JSON via from_json + StructType
+- Discovered: NULL timestamps in Session 2 test messages (from_json fills missing fields with NULL)
+
+### Session 7: Tumbling windows + aggregations
+- Converted timestamp Long → TimestampType (divide by 1000, cast)
+- Cast price String → Double (explicit, not relying on implicit coercion)
+- groupBy(window(event_time, "1 minute"), symbol) + avg(price) + count
+- outputMode("update") — required for aggregations (same window re-emitted with updated values)
+- Observed live: same window's avg_price changing across batches as new trades arrived
+
+### Session 8: Watermarks + fault tolerance
+- Added .withWatermark("event_time", "2 minutes")
+- Changed startingOffsets from "earliest" to "latest" (live monitoring focus)
+- Fault tolerance experiment:
+  - Kafka temporarily unreachable → Spark retries indefinitely
+  - Kafka restarting (metadata not ready) → STREAM_FAILED, manual restart needed
+  - After restart → checkpoint ensures resume from exact offset (Batch: 9, not Batch: 0)
+  - No data loss — Kafka retained messages, Spark caught up
+
+## Current project structure
+
+```
+realtime-trade-pipeline/
+├── .gitignore
+├── CLAUDE.md
+├── README.md
+├── requirements.txt          # kafka-python, websocket-client, pyspark
+├── docker/
+│   └── docker-compose.yml    # ZooKeeper + Kafka (Confluent 7.4.0)
+├── producer/
+│   └── producer.py           # Binance WebSocket → Kafka producer
+├── consumer/
+│   └── consumer.py           # Simple Kafka consumer (Session 4, for debugging)
+├── spark/
+│   └── spark_job.py          # Spark Structured Streaming job
+├── checkpoints/              # .gitignored — Spark checkpoint data
+│   └── trades_windowed/
+└── venv/                     # .gitignored
+```
+
+## Current docker-compose.yml services
+
+```yaml
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    ports: ["2181:2181"]
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    depends_on: [zookeeper]
+    ports: ["9092:9092"]
+```
+
+## Current spark_job.py structure
+
+```python
+import os
+os.environ["JAVA_HOME"] = r"C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot"
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, from_json, window, avg, count
+from pyspark.sql.types import StructType, StructField, StringType, LongType, TimestampType
+
+# SparkSession with Kafka connector
+# readStream from Kafka (trades topic, startingOffsets: latest)
+# Parse JSON: raw bytes → struct → flattened columns (symbol, price, quantity, timestamp)
+# Convert timestamp Long → TimestampType, price String → Double
+# Watermark: 2 minutes on event_time
+# groupBy(window(event_time, 1 min), symbol) → avg(price), count(price)
+# writeStream outputMode("update") format("console") with checkpoint
+```
+
+## What still needs to be built
+
+### Session 9: Add Cassandra
+- Add Cassandra to docker-compose.yml as a new service
+- Design the data model FIRST (before any code):
+  - What is the partition key? Why?
+  - What is the clustering key? Why?
+  - Think about query patterns: "give me all trades for BTCUSDT in the last hour"
+- Write the Spark-to-Cassandra sink (spark-cassandra-connector)
+- Verify data lands in Cassandra via cqlsh CLI
+- Explain WHY Cassandra (not Postgres): write-optimized, partitioned, eventually consistent
+
+### Session 10: Add Elasticsearch
+- Add Elasticsearch to docker-compose.yml
+- Understand why Elasticsearch alongside Cassandra (two different query patterns)
+- Cassandra: "get trades by symbol and time range" (known key lookups)
+- Elasticsearch: "which symbol had most volatile price swings?" (full-text search, aggregation)
+- Write the Spark-to-Elasticsearch sink
+- Verify data is indexed via Elasticsearch REST API
+- Now the full pipeline is complete:
+  [Binance] → [Producer] → [Kafka] → [Spark] → [Cassandra] + [Elasticsearch]
+
+### Session 11: Dashboard (Kibana)
+- Add Kibana to docker-compose.yml (pairs with Elasticsearch)
+- Create visualizations: price trends, trade volume per minute, symbol comparison
+- This makes the project DEMONSTRABLE in interviews
+
+### Session 12: README + architecture diagram + "what I learned" doc
+- README must explain WHY each tool was chosen, not just what it does
+- Architecture diagram (can use ASCII or a proper diagram tool)
+- "What I learned" section — honest, specific, not generic
+- Final commit, clean repo
 
 ## Teaching rules — FOLLOW THESE WITHOUT EXCEPTION
 
@@ -56,9 +206,8 @@ my understanding, not to build the project for me.
    Tell me exactly what to write and where. I type it. You review.
 
 5. EXPLAIN THE WHY. Every tool choice needs justification:
-   "We're using Kafka instead of a REST API because..."
-   "We're writing to Cassandra instead of Postgres because..."
-   "We need two sinks instead of one because..."
+   "We're using Cassandra instead of Postgres because..."
+   "We need Elasticsearch alongside Cassandra because..."
 
 6. CHECK IN CONSTANTLY. After every meaningful step:
    "Does this make sense? Want me to go deeper before we move on?"
@@ -79,107 +228,56 @@ my understanding, not to build the project for me.
    we covered, what broke and what we learned from it, one thing
    I should try on my own, and a suggested commit message.
 
-## Streaming-specific rules — CRITICAL
-
-10. CONCEPTS BEFORE CODE — STRICTLY. The first 1-2 sessions will
-    have ZERO code. This is intentional and non-negotiable. If I
-    ask to skip ahead, remind me we agreed on this.
-
-11. ASCII ARCHITECTURE FIRST. Before adding any new component,
+10. ASCII ARCHITECTURE FIRST. Before adding any new component,
     draw the updated system architecture in ASCII. I need to see
     how the pieces connect before I write a single line.
 
-    Example format:
-    [Producer] --> [Kafka Topic] --> [Spark Consumer] --> [Cassandra]
-                                                      --> [Elasticsearch]
+11. ANALOGIES ARE MANDATORY. Every new concept needs an analogy
+    to something I already know (Kafka topics ↔ Discord channels,
+    Cassandra partition key ↔ Kafka partitions, etc.)
 
-12. ANALOGIES ARE MANDATORY. Streaming concepts are hard. Every
-    new concept needs an analogy to something I already know:
-    - Compare Kafka topics to something I've seen in Airflow or Postgres
-    - Compare partitions to something from my Discord bot experience
-    - Compare offsets to something concrete and physical
-
-13. TEST MY UNDERSTANDING BEFORE MOVING ON. After every concept,
+12. TEST MY UNDERSTANDING BEFORE MOVING ON. After every concept,
     ask me to explain it back in my own words. If I can't, we
     don't move forward. This is not optional.
 
-14. NEVER SAY "it's just like X." Streaming is genuinely different
-    from batch. Don't minimize the complexity. Acknowledge it and
-    explain it properly.
+13. NEVER SAY "it's just like X." Streaming is genuinely different
+    from batch. Don't minimize the complexity.
 
-## Concepts I need to understand deeply
-
-These are the things I will be asked about in interviews.
-Make sure I can explain every single one:
+## Concepts I already understand (verified through Sessions 1-8)
 
 Kafka:
-- Why Kafka exists (what problem does it solve that a REST API can't)
-- Topics, partitions, and why partitioning matters
-- Producers and consumer groups
-- Offsets and why they matter for fault tolerance
-- At-least-once vs exactly-once delivery
-- Why Kafka retains messages after consumption
-- When you would NOT use Kafka
+- Why Kafka exists (buffer between producer and consumer, handles backpressure)
+- Topics = channels, Producers = senders, Consumers = listeners
+- Partitions = unit of parallelism, consumers capped by partition count
+- Offsets = sequential counter per partition, committed to track progress
+- At-least-once delivery (crash before commit = duplicate)
+- Message key partitioning (same key → same partition → ordering guarantee)
+- Consumer groups (same group splits partitions, different groups get all)
 
 Spark Structured Streaming:
-- How it differs from batch Spark
-- Micro-batch vs continuous processing
-- Watermarks and why late data is a hard problem
-- Windowing (tumbling, sliding, session)
-- Checkpointing and fault tolerance
-- Triggers
+- Unbounded table mental model
+- readStream vs read (streaming vs batch)
+- Tumbling windows (non-overlapping time buckets)
+- Watermarks (deadline for late data, correctness vs timeliness tradeoff)
+- Checkpoints (offset tracking on disk, enables crash recovery)
+- Output modes: append (final only), update (re-emit changed), complete (full table)
+- from_json + StructType for parsing
+- withColumn for adding/transforming columns (immutable DataFrames)
+
+## Concepts I still need to learn deeply
 
 Cassandra:
 - Why Cassandra for streaming writes (not Postgres)
 - The data model (partition key, clustering key)
 - Eventual consistency and when that's acceptable
 - Why Cassandra is fast for writes
+- CQL basics
 
 Elasticsearch:
-- What it's for (search and aggregation, not storage)
+- What it's for (search and aggregation, not primary storage)
 - Why we need it alongside Cassandra (two different query patterns)
 - Basic indexing concepts
-
-## Session map
-
-Session 1: CONCEPTS ONLY — no code, no setup.
-           What is streaming, why it exists, when you need it.
-           Propose 3-4 data source options, I pick one.
-           Draw the full architecture in ASCII.
-           Explain the role of each component.
-
-Session 2: Kafka concepts deep dive. Topics, partitions,
-           consumer groups, offsets. Set up Kafka with
-           Docker Compose. Explore with CLI tools only.
-           NO Python code yet.
-
-Session 3: Write a Python producer. Publish events to a
-           Kafka topic. Verify with kafka-console-consumer.
-           Understand serialization.
-
-Session 4: Write a Python consumer (no Spark yet). Read
-           events. Understand consumer groups and offsets
-           in practice by experimenting with them.
-
-Session 5: Introduce Spark Structured Streaming concepts.
-           Replace the simple Python consumer with a
-           Spark Streaming job. Process and print events.
-
-Session 6: Add Cassandra. Design the data model first
-           (partition key, clustering key). Then write the
-           Spark-to-Cassandra sink.
-
-Session 7: Add Elasticsearch. Understand why it's different
-           from Cassandra. Write the second sink. Now we
-           have the full pipeline.
-
-Session 8: Fault tolerance, error handling, schema validation,
-           basic monitoring. What happens when Kafka goes down?
-           What happens when Cassandra is slow?
-
-Session 9: README, architecture diagram, "what I learned" doc.
-           The README should explain WHY each tool was chosen,
-           not just what it does.
+- Kibana for visualization
 
 ## Communication style
 
@@ -190,19 +288,12 @@ Session 9: README, architecture diagram, "what I learned" doc.
 - If I'm doing something wrong, say so directly.
 - This project is hard. Acknowledge difficulty, don't pretend it's easy.
 
-## Important context
+## Important constraints
 
-This project is intentionally separate from Egypt Jobs Pipeline.
-The Egypt Jobs Pipeline V3 will be a real-time alert system
-(WebSocket scraper + Telegram/Discord notifications) — simpler,
-solves a real problem.
-
-THIS project is about learning streaming architecture deeply.
-The data source will be something that naturally produces real-time
-events (crypto prices, Wikipedia changes, simulated e-commerce
-events — decided in Session 1).
-
-Do not suggest merging this with Egypt Jobs Pipeline.
-Do not suggest using Airflow here.
-Do not suggest Postgres as a sink — Cassandra and Elasticsearch
-are chosen specifically to learn new tools.
+- Do NOT suggest merging this with Egypt Jobs Pipeline.
+- Do NOT suggest using Airflow here.
+- Do NOT suggest Postgres as a sink — Cassandra and Elasticsearch
+  are chosen specifically to learn new tools.
+- Windows environment: Java 17 required (not 25), HADOOP_HOME must
+  be set, winutils.exe must exist at C:\hadoop\bin\
+- Spark 4.1.2 with Scala 2.13 — Kafka connector JAR version must match.
