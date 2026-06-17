@@ -1,3 +1,8 @@
+import os
+os.environ["HADOOP_HOME"] = r"C:\hadoop"
+os.environ["JAVA_HOME"] = r"C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot"
+os.environ["PATH"] = r"C:\hadoop\bin" + ";" + os.environ.get("PATH", "")
+
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, from_json
 from pyspark.sql.types import StructType, StructField, StringType, LongType
@@ -7,7 +12,8 @@ from pyspark.sql.types import TimestampType
 spark = SparkSession.builder \
     .appName("TradeStreamProcessor") \
     .master("local[*]") \
-    .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.2") \
+    .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.2,com.datastax.spark:spark-cassandra-connector_2.13:3.5.1") \
+    .config("spark.cassandra.connection.host", "localhost") \
     .getOrCreate()
     
 df = spark.readStream \
@@ -68,6 +74,27 @@ query = windowed_avg.writeStream \
     .option("checkpointLocation", "checkpoints/trades_windowed") \
     .option("truncate", "false") \
     .start()
+    
+cassandra_df = windowed_avg.select(
+    col("symbol"),
+    col("window.start").alias("window_start"),
+    col("window.end").alias("window_end"),
+    col("avg_price"),
+    col("trade_count")
+)
+
+cassandra_query = cassandra_df.writeStream \
+    .outputMode("update") \
+    .foreachBatch(lambda batch_df, batch_id: 
+        batch_df.write \
+            .format("org.apache.spark.sql.cassandra") \
+            .option("keyspace", "trade_pipeline") \
+            .option("table", "windowed_trades") \
+            .mode("append") \
+            .save()
+    ) \
+    .option("checkpointLocation", "checkpoints/trades_cassandra") \
+    .start()
 
 
-query.awaitTermination()
+spark.streams.awaitAnyTermination()
