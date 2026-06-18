@@ -30,3 +30,13 @@ services:
       - "9042:9042"
     environment:
       CASSANDRA_CLUSTER_NAME: "TradeCluster"
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"

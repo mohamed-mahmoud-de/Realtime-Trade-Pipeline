@@ -3,6 +3,7 @@ os.environ["HADOOP_HOME"] = r"C:\hadoop"
 os.environ["JAVA_HOME"] = r"C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot"
 os.environ["PATH"] = r"C:\hadoop\bin" + ";" + os.environ.get("PATH", "")
 
+from elasticsearch import Elasticsearch
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, from_json
 from pyspark.sql.types import StructType, StructField, StringType, LongType
@@ -14,8 +15,12 @@ spark = SparkSession.builder \
     .master("local[*]") \
     .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.2,com.datastax.spark:spark-cassandra-connector_2.13:3.5.1") \
     .config("spark.cassandra.connection.host", "localhost") \
+    .config("spark.sql.shuffle.partitions", "4") \
+    .config("spark.sql.streaming.metricsEnabled", "false") \
     .getOrCreate()
-    
+
+spark.sparkContext.setLogLevel("ERROR")
+
 df = spark.readStream \
     .format("kafka") \
     .option("kafka.bootstrap.servers", "localhost:9092") \
@@ -64,17 +69,6 @@ windowed_avg = trades_with_time \
         count(col("price_numeric")).alias("trade_count")
     )
 
-parsed_trades.printSchema()
-flattened_trades.printSchema()
-
-
-query = windowed_avg.writeStream \
-    .outputMode("update") \
-    .format("console") \
-    .option("checkpointLocation", "checkpoints/trades_windowed") \
-    .option("truncate", "false") \
-    .start()
-    
 cassandra_df = windowed_avg.select(
     col("symbol"),
     col("window.start").alias("window_start"),
@@ -83,18 +77,36 @@ cassandra_df = windowed_avg.select(
     col("trade_count")
 )
 
-cassandra_query = cassandra_df.writeStream \
+es = Elasticsearch("http://localhost:9200")
+
+def write_to_sinks(batch_df, batch_id):
+    if batch_df.isEmpty():
+        return
+
+    batch_df.show(truncate=False)
+
+    batch_df.write \
+        .format("org.apache.spark.sql.cassandra") \
+        .option("keyspace", "trade_pipeline") \
+        .option("table", "windowed_trades") \
+        .mode("append") \
+        .save()
+
+    rows = batch_df.collect()
+    for row in rows:
+        doc = {
+            "symbol": row["symbol"],
+            "window_start": str(row["window_start"]),
+            "window_end": str(row["window_end"]),
+            "avg_price": row["avg_price"],
+            "trade_count": row["trade_count"]
+        }
+        es.index(index="windowed_trades", document=doc)
+
+query = cassandra_df.writeStream \
     .outputMode("update") \
-    .foreachBatch(lambda batch_df, batch_id: 
-        batch_df.write \
-            .format("org.apache.spark.sql.cassandra") \
-            .option("keyspace", "trade_pipeline") \
-            .option("table", "windowed_trades") \
-            .mode("append") \
-            .save()
-    ) \
-    .option("checkpointLocation", "checkpoints/trades_cassandra") \
+    .foreachBatch(write_to_sinks) \
+    .option("checkpointLocation", "checkpoints/trades_pipeline") \
     .start()
 
-
-spark.streams.awaitAnyTermination()
+query.awaitTermination()

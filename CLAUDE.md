@@ -153,9 +153,7 @@ from pyspark.sql.types import StructType, StructField, StringType, LongType, Tim
 # writeStream outputMode("update") format("console") with checkpoint
 ```
 
-## What still needs to be built
-
-### Session 9: Add Cassandra
+### Session 9: Add Cassandra (COMPLETE)
 - Add Cassandra to docker-compose.yml as a new service
 - Design the data model FIRST (before any code):
   - What is the partition key? Why?
@@ -165,14 +163,20 @@ from pyspark.sql.types import StructType, StructField, StringType, LongType, Tim
 - Verify data lands in Cassandra via cqlsh CLI
 - Explain WHY Cassandra (not Postgres): write-optimized, partitioned, eventually consistent
 
-### Session 10: Add Elasticsearch
-- Add Elasticsearch to docker-compose.yml
-- Understand why Elasticsearch alongside Cassandra (two different query patterns)
-- Cassandra: "get trades by symbol and time range" (known key lookups)
-- Elasticsearch: "which symbol had most volatile price swings?" (full-text search, aggregation)
-- Write the Spark-to-Elasticsearch sink
-- Verify data is indexed via Elasticsearch REST API
-- Now the full pipeline is complete:
+### Session 10: Add Elasticsearch (COMPLETE)
+- Added Elasticsearch 8.11.0 to docker-compose.yml (single-node, xpack security disabled)
+- Learned: ES inverted index vs Cassandra partition-key lookups (two query patterns for same data)
+- Learned: ES discovery.type=single-node (prevents waiting for cluster nodes that don't exist)
+- Tried ES Spark connector JAR → incompatible with Spark 4.x (NoSuchMethodError sqlContext)
+- Switched to Python elasticsearch library as the ES sink instead
+- Hit elasticsearch v9 client vs v8 server incompatibility → pinned elasticsearch==8.11.0
+- Hit Spark 4.1.2 bug: NullPointerException in KafkaMicroBatchStream$.metrics when multiple
+  streaming queries share same Kafka source — even with just 2 streams
+- Fix: merged Cassandra + ES writes into ONE foreachBatch within a single writeStream
+- Added spark.sql.shuffle.partitions=4 (default 200 was creating 199 empty tasks per batch)
+- Added spark.sparkContext.setLogLevel("ERROR") to suppress noisy WARN spam
+- Verified data in ES via localhost:9200/windowed_trades/_search?pretty (22 docs indexed)
+- Full pipeline now working:
   [Binance] → [Producer] → [Kafka] → [Spark] → [Cassandra] + [Elasticsearch]
 
 ### Session 11: Dashboard (Kibana)
