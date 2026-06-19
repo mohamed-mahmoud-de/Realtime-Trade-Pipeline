@@ -101,7 +101,8 @@ def write_to_sinks(batch_df, batch_id):
             "avg_price": row["avg_price"],
             "trade_count": row["trade_count"]
         }
-        es.index(index="windowed_trades", document=doc)
+        doc_id = f"{row['symbol']}_{row['window_start']}"
+        es.index(index="windowed_trades", id=doc_id, document=doc)
 
 query = cassandra_df.writeStream \
     .outputMode("update") \
