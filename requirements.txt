@@ -1,3 +1,4 @@
 kafka-python
 websocket-client
 pyspark
+elasticsearch==8.11.0
