@@ -106,6 +106,12 @@ python spark/spark_job.py
 
 **Watermarks are a memory vs correctness tradeoff.** Without a watermark, Spark either keeps every window open forever (memory explodes) or drops late data silently. A 2-minute watermark says: accept late trades up to 2 minutes, then close the window. For crypto data that rarely arrives more than seconds late, this is generous — but it's a conscious decision, not a default.
 
+## Kibana Dashboard
+
+![BTC Avg Price Over Time and Trade Volume Per Minute](Dashboard.png)
+
+![Latest BTC Price and Total Trades Processed](dashboard1.png)
+
 ## Tech Stack
 
 | Component | Version | Purpose |
